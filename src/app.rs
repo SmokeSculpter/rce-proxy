@@ -20,3 +20,11 @@ pub struct ExecuteReponse {
     stderr: String,
     exit_code: i32,
 }
+
+impl AppState {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key: Arc::new(api_key),
+        }
+    }
+}
