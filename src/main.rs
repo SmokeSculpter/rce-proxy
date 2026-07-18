@@ -7,6 +7,7 @@ use axum::{
 };
 
 mod app;
+mod piston;
 
 #[tokio::main]
 async fn main() {
