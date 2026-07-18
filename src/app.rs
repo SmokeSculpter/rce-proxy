@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct AppState {
     pub api_key: Arc<String>,
-    http: reqwest::Client,
-    piston_url: Arc<String>,
-    language: Arc<String>,
-    version: Arc<String>,
+    pub http: reqwest::Client,
+    pub piston_url: Arc<String>,
+    pub language: Arc<String>,
+    pub version: Arc<String>,
 }
 
 #[derive(Deserialize)]
@@ -19,7 +19,7 @@ pub struct ExecuteRequest {
 }
 
 #[derive(Serialize)]
-pub struct ExecuteReponse {
+pub struct ExecuteResponse {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
@@ -40,9 +40,5 @@ impl AppState {
             language: Arc::new(language),
             version: Arc::new(version),
         }
-    }
-
-    pub fn api_key(self) -> Arc<String> {
-        self.api_key
     }
 }
