@@ -25,7 +25,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release
       - name: Install binary
-        run: cp target/release/gateway /opt/gateway/gateway
+        run: cp target/release/rce_proxy /opt/gateway/gateway
       - name: Restart service
         run: sudo systemctl restart gateway.service
       - name: Smoke test
