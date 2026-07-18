@@ -5,6 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
+use std::{env::var, time::Duration};
 
 mod app;
 mod piston;
@@ -12,14 +13,17 @@ mod piston;
 #[tokio::main]
 async fn main() {
     // Get key and init state
-    let api_key = std::env::var("GATEWAY_API_KEY").unwrap_or_else(|_| "dev_key".into());
-    let state = AppState::new(api_key);
+    let (api_key, piston_url, language, version) = get_env_vars();
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("http client failed to start");
+
+    let state = AppState::new(api_key, http, piston_url, language, version);
 
     // Crate app instance an add routes
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/execute", post(execute))
-        .with_state(state);
+    let app = build_router(state);
 
     // Bind listener to port 8080
     let address = "0.0.0.0:8080";
@@ -28,6 +32,24 @@ async fn main() {
 
     // Start server with axum gateway
     axum::serve(listener, app).await.unwrap();
+}
+
+// Get all environment variables
+fn get_env_vars() -> (String, String, String, String) {
+    let api_key = var("GATEWAY_API_KEY").unwrap_or_else(|_| "dev_key".into());
+    let piston_url = var("PISTON_URL").unwrap_or_else(|_| "http://localhost:2000".into());
+    let language = var("PISTON_LANGUAGE").unwrap_or_else(|_| "javascript".into());
+    let version = var("PISTON_VERSION").unwrap_or_else(|_| "*".into());
+
+    (api_key, piston_url, language, version)
+}
+
+// Build router
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("execute", post(execute))
+        .with_state(state)
 }
 
 // This endpoints exists just to check that the server works
