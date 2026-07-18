@@ -1,6 +1,8 @@
-use crate::app::AppState;
+use crate::app::{AppState, ExecuteReponse, ExecuteRequest};
 use axum::{
-    Router,
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
 
@@ -27,8 +29,30 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+// This endpoints exists just to check that the server works
 async fn health() -> &'static str {
     "ok"
 }
 
-async fn execute() {}
+// Proxy request to piston instance then respond with piston response
+async fn execute(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ExecuteRequest>,
+) -> Result<Json<ExecuteReponse>, StatusCode> {
+    let provided = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if provided != state.api_key.as_str() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Just a stubout for now will forward to piston instance later
+    Ok(Json(ExecuteReponse {
+        stdout: format!("received {} bytes on code", req.code.len()),
+        stderr: String::new(),
+        exit_code: 0,
+    }))
+}

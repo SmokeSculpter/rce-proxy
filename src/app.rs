@@ -4,21 +4,21 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct AppState {
-    api_key: Arc<String>,
+    pub api_key: Arc<String>,
 }
 
 #[derive(Deserialize)]
 pub struct ExecuteRequest {
-    code: String,
+    pub code: String,
     #[allow(dead_code)]
-    stdin: String, // Will use for another project might as well add now
+    pub stdin: String, // Will use for another project might as well add now
 }
 
 #[derive(Serialize)]
 pub struct ExecuteReponse {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
 }
 
 impl AppState {
