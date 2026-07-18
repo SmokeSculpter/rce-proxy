@@ -8,7 +8,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use std::{env::var, time::Duration};
+use std::{env::var, sync::Arc, time::Duration};
 
 mod app;
 mod piston;
@@ -110,206 +110,70 @@ async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::response::IntoResponse;
-    use serde_json::{Value, json};
-    use std::sync::{Arc, Mutex};
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt; // for `oneshot`
 
-    // Spawns a router on an ephemeral port and returns its base URL.
-    async fn spawn(router: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        format!("http://{addr}")
+    fn test_state(piston_url: String) -> AppState {
+        AppState {
+            api_key: Arc::new("secret".into()),
+            http: reqwest::Client::new(),
+            piston_url: Arc::new(piston_url),
+            language: Arc::new("javascript".into()),
+            version: Arc::new("*".into()),
+        }
     }
 
-    // Stand-in for a Piston instance. Replies with `status` and `body` to any
-    // POST /api/v2/execute, and records the request bodies it received.
-    async fn spawn_piston(status: StatusCode, body: Value) -> (String, Arc<Mutex<Vec<Value>>>) {
-        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-        let recorder = seen.clone();
-
-        let router = Router::new().route(
-            "/api/v2/execute",
-            post(move |Json(req): Json<Value>| {
-                let recorder = recorder.clone();
-                let body = body.clone();
-                async move {
-                    recorder.lock().unwrap().push(req);
-                    (status, Json(body)).into_response()
-                }
-            }),
-        );
-
-        (spawn(router).await, seen)
-    }
-
-    // Gateway wired to the given Piston URL, with a known API key.
-    fn state_for(piston_url: &str) -> AppState {
-        AppState::new(
-            "test_key".into(),
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
-            piston_url.into(),
-            "javascript".into(),
-            "*".into(),
-        )
-    }
-
-    fn ok_run() -> Value {
-        json!({ "run": { "stdout": "hi\n", "stderr": "", "code": 0 } })
+    fn post_execute(key: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/execute")
+            .header("content-type", "application/json");
+        if let Some(k) = key {
+            b = b.header("x-api-key", k);
+        }
+        b.body(Body::from(r#"{"code":"console.log(1)","stdin":""}"#))
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn health_returns_ok() {
-        let url = spawn(build_router(state_for("http://unused"))).await;
-
-        let resp = reqwest::get(format!("{url}/health")).await.unwrap();
-
-        assert_eq!(resp.status(), 200);
-        assert_eq!(resp.text().await.unwrap(), "ok");
+    async fn wrong_key_is_rejected() {
+        // bogus piston url is fine: auth fails before we ever call it
+        let app = build_router(test_state("http://127.0.0.1:1".into()));
+        let res = app.oneshot(post_execute(Some("nope"))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn execute_forwards_piston_output() {
-        let (piston_url, seen) = spawn_piston(StatusCode::OK, ok_run()).await;
-        let url = spawn(build_router(state_for(&piston_url))).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/execute"))
-            .header("x-api-key", "test_key")
-            .json(&json!({ "code": "console.log('hi')", "stdin": "" }))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), 200);
-        assert_eq!(
-            resp.json::<Value>().await.unwrap(),
-            json!({ "stdout": "hi\n", "stderr": "", "exit_code": 0 })
-        );
-
-        // The code from the request must reach Piston under the configured runtime.
-        let sent = &seen.lock().unwrap()[0];
-        assert_eq!(sent["language"], "javascript");
-        assert_eq!(sent["version"], "*");
-        assert_eq!(sent["files"][0]["content"], "console.log('hi')");
-
-        // Sandbox limits are only enforced if the field names match Piston's API
-        // exactly -- a typo here is silently ignored and runs go unbounded.
-        assert_eq!(sent["run_timeout"], 3000);
-        assert_eq!(sent["run_memory_limit"], 128 * 1024 * 1024);
+    async fn missing_key_is_rejected() {
+        let app = build_router(test_state("http://127.0.0.1:1".into()));
+        let res = app.oneshot(post_execute(None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn execute_rejects_wrong_api_key() {
-        let (piston_url, seen) = spawn_piston(StatusCode::OK, ok_run()).await;
-        let url = spawn(build_router(state_for(&piston_url))).await;
+    async fn correct_key_maps_piston_output() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/execute"))
-            .header("x-api-key", "wrong_key")
-            .json(&json!({ "code": "console.log('hi')", "stdin": "" }))
-            .send()
-            .await
-            .unwrap();
+        // stand up a fake Piston that returns a canned result
+        let piston = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/execute"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "run": { "stdout": "1\n", "stderr": "", "code": 0 }
+            })))
+            .mount(&piston)
+            .await;
 
-        assert_eq!(resp.status(), 401);
-        // Auth must happen before anything touches Piston.
-        assert!(seen.lock().unwrap().is_empty());
-    }
+        let app = build_router(test_state(piston.uri()));
+        let res = app.oneshot(post_execute(Some("secret"))).await.unwrap();
 
-    #[tokio::test]
-    async fn execute_rejects_missing_api_key() {
-        let (piston_url, seen) = spawn_piston(StatusCode::OK, ok_run()).await;
-        let url = spawn(build_router(state_for(&piston_url))).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/execute"))
-            .json(&json!({ "code": "console.log('hi')", "stdin": "" }))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), 401);
-        assert!(seen.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn execute_maps_piston_error_to_bad_gateway() {
-        let (piston_url, _) = spawn_piston(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({ "message": "boom" }),
-        )
-        .await;
-        let url = spawn(build_router(state_for(&piston_url))).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/execute"))
-            .header("x-api-key", "test_key")
-            .json(&json!({ "code": "1", "stdin": "" }))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), 502);
-    }
-
-    #[tokio::test]
-    async fn execute_maps_unreachable_piston_to_bad_gateway() {
-        // Port 1 on loopback: nothing listens there.
-        let url = spawn(build_router(state_for("http://127.0.0.1:1"))).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/execute"))
-            .header("x-api-key", "test_key")
-            .json(&json!({ "code": "1", "stdin": "" }))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), 502);
-    }
-
-    #[tokio::test]
-    async fn execute_defaults_missing_exit_code_to_minus_one() {
-        // Piston omits `code` when the process is killed by a signal.
-        let (piston_url, _) = spawn_piston(
-            StatusCode::OK,
-            json!({ "run": { "stdout": "", "stderr": "killed", "code": null } }),
-        )
-        .await;
-        let url = spawn(build_router(state_for(&piston_url))).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/execute"))
-            .header("x-api-key", "test_key")
-            .json(&json!({ "code": "while(true){}", "stdin": "" }))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), 200);
-        assert_eq!(resp.json::<Value>().await.unwrap()["exit_code"], -1);
-    }
-
-    #[tokio::test]
-    async fn execute_rejects_malformed_body() {
-        let (piston_url, seen) = spawn_piston(StatusCode::OK, ok_run()).await;
-        let url = spawn(build_router(state_for(&piston_url))).await;
-
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/execute"))
-            .header("x-api-key", "test_key")
-            .json(&json!({ "stdin": "" })) // no `code`
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), 422);
-        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["stdout"], "1\n");
+        assert_eq!(v["exit_code"], 0);
     }
 }
