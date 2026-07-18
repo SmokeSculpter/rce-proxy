@@ -14,12 +14,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
 
-  deploy:
+deploy:
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: [self-hosted, linux, X64]
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build release binary
         run: cargo build --release
       - name: Install binary
